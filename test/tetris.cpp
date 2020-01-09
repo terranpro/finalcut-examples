@@ -2,6 +2,7 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include <chrono>
 
 #include <final/final.h>
 
@@ -247,6 +248,7 @@ struct engine
 	std::unique_ptr<piece> next_piece{generate_piece()};
 
 	int score{0};
+	int drop_height{0};
 
 	explicit engine(std::size_t w = 8, std::size_t h = 10)
 		: width(w)
@@ -259,7 +261,7 @@ struct engine
 		board.resize( height, std::vector<int>(width, 0) );
 	}
 
-	void update()
+	std::vector<std::size_t> update()
 	{
 		if (!active_piece) {
 			active_piece = std::move(next_piece);
@@ -273,7 +275,7 @@ struct engine
 
 			cement_piece();
 
-			return;
+			return {};
 		}
 
 		clear_active_piece();
@@ -286,10 +288,12 @@ struct engine
 			cement_piece();
 			active_piece.reset();
 
-			try_clear_lines();
+			return try_clear_lines();
 		} else {
 			cement_piece();
 		}
+
+		return {};
 	}
 
 	void move_left()
@@ -343,7 +347,24 @@ struct engine
 
 		active_piece->rotate();
 
+		int offsets[] = {
+			-1, -2, +1, +2
+		};
+		int orig = active_piece->orig_x;
+		int i = 0;
+
+		while (check_collision() && i < sizeof(offsets)/sizeof(offsets[0])) {
+			active_piece->rotate();
+			active_piece->rotate();
+			active_piece->rotate();
+
+			active_piece->orig_x = orig + offsets[i++];
+			active_piece->rotate();
+		}
+
 		if (check_collision()) {
+			active_piece->orig_x = orig;
+
 			active_piece->rotate();
 			active_piece->rotate();
 			active_piece->rotate();
@@ -396,9 +417,9 @@ struct engine
 				board[y+b.second][x+b.first] = active_piece->id;
 	}
 
-	void try_clear_lines()
+	std::vector<std::size_t> try_clear_lines()
 	{
-		std::vector<int> linenumstoclear;
+		std::vector<std::size_t> linenumstoclear;
 
 		for (int y = height-1; y != 0; --y) {
 			bool isfull = true;
@@ -414,17 +435,19 @@ struct engine
 		}
 
 		if (linenumstoclear.empty())
-			return;
+			return linenumstoclear;
+
+		auto remaining = linenumstoclear;
 
 		int cleared = 0;
 		for (int beg = -1, cur = 0;
-		     !linenumstoclear.empty() && cleared < 4;
+		     !remaining.empty() && cleared < 4;
 		     ++beg,++cur,++cleared)
 		{
-			board.erase(board.begin() + linenumstoclear[0],
-			            board.begin() + linenumstoclear[0] + 1);
+			board.erase(board.begin() + remaining[0],
+			            board.begin() + remaining[0] + 1);
 
-			linenumstoclear.erase(linenumstoclear.begin());
+			remaining.erase(remaining.begin());
 		}
 
 		std::reverse(board.begin(), board.end());
@@ -447,6 +470,8 @@ struct engine
 			score += 1200;
 			break;
 		}
+
+		return linenumstoclear;
 	}
 
 	std::unique_ptr<piece> generate_piece() const {
@@ -529,15 +554,24 @@ struct engine
 
 class TetrisWindow : public fc::FWindow
 {
+public:
 	int startx{1}, starty{1};
 	int update_ms = 300;
 	int timer_id{0};
 
-	// fc::FVTerm::FTermArea *child_area;
 	game::engine engine{15, 19};
 
 	std::size_t scale_x = 4, scale_y = 2;
 	std::size_t win_width = 32, win_height = 21;
+
+	bool draw_ghost = true;
+
+	bool animating = false;
+	std::chrono::high_resolution_clock::time_point animating_start{};
+	std::size_t animating_frame = 0;
+	std::vector<std::size_t> cleared_lines;
+	decltype(game::engine::board) animating_board;
+
 
 public:
 	explicit TetrisWindow(fc::FWidget& parent)
@@ -552,6 +586,9 @@ public:
 
 	void onKeyPress (fc::FKeyEvent* ev) override
 	{
+		if (animating)
+			return;
+
 		auto key = ev->key();
 		switch(key) {
 		case fc::fc::Fkey_escape:
@@ -574,15 +611,19 @@ public:
 			engine.rotate();
 			break;
 
+		case 'g':
+			draw_ghost = !draw_ghost;
+			break;
+
 		case fc::fc::Fkey_down:
 			delTimer(timer_id);
-			engine.update();
-			timer_id = addTimer(update_ms);
+			if (!doUpdate())
+				timer_id = addTimer(update_ms);
 			break;
 
 		case fc::fc::Fkey_space:
 			while(engine.active_piece)
-				engine.update();
+				doUpdate();
 			break;
 
 		case 'x':
@@ -619,32 +660,78 @@ public:
 
 	fc::fc::colornames getPieceColor(char p) const
 	{
+		std::vector<fc::fc::colornames> animating_colors = {
+			fc::fc::Grey100,
+			fc::fc::Grey93,
+			fc::fc::Grey89,
+			fc::fc::Grey85,
+			fc::fc::Grey84,
+			// fc::fc::Grey82,
+			// fc::fc::Grey78,
+			// fc::fc::Grey74,
+			// fc::fc::Grey70
+		};
+
 		switch(p) {
-				case 't':
-					return fc::fc::Purple;
+		case 't':
+			return fc::fc::Purple;
 
-				case 's':
-					return fc::fc::Red;
+		case 's':
+			return fc::fc::Red;
 
-				case 'z':
-					return fc::fc::Blue;
+		case 'z':
+			return fc::fc::Blue;
 
-				case 'l':
-					return fc::fc::Orange1;
+		case 'l':
+			return fc::fc::Orange1;
 
-				case 'j':
-					return fc::fc::DarkSeaGreen1;
+		case 'j':
+			return fc::fc::DarkSeaGreen1;
 
-				case 'o':
-					return fc::fc::Yellow;
+		case 'o':
+			return fc::fc::Yellow;
 
-				case 'i':
-					return fc::fc::Cyan;
+		case 'i':
+			return fc::fc::Cyan;
 
-				case 0:
-				default:
-					return fc::fc::Black;
-				}
+		case '9':
+			return fc::fc::DarkRed2;
+		case '8':
+			return fc::fc::DarkRed;
+		case '7':
+			return fc::fc::Red3;
+		case '6':
+			return fc::fc::Red2;
+		case '5':
+			return fc::fc::Red1;
+		case '4':
+			return fc::fc::Red;
+		case '3':
+			return fc::fc::MediumVioletRed;
+		case '2':
+			return fc::fc::LightRed;
+		case '1':
+			return fc::fc::PaleVioletRed1;
+		case '0':
+			return fc::fc::Black;
+
+		case 0:
+		default:
+			if (animating)
+				return animating_colors[ rand() % animating_colors.size() ];
+			return fc::fc::Black;
+		}
+	}
+
+	bool doUpdate()
+	{
+		animating_board = engine.board;
+
+		cleared_lines = engine.update();
+		if (cleared_lines.size() > 0)
+			startAnimation();
+
+		return cleared_lines.size();
 	}
 
 	void draw() override
@@ -654,11 +741,16 @@ public:
 
 		clearArea( fc::fc::MediumShade );
 
-		print() << fc::FPoint(startx,starty) << "well well well " << fc::fc::FullBlock;
+		print() << fc::FPoint(startx,starty) << "well well well "
+		        << animating_frame << fc::fc::FullBlock;
 
 		for(int y = 0; y != engine.board.size(); ++y) {
 			for(int x = 0; x < engine.board[y].size(); ++x) {
-				auto color = getPieceColor(engine.board[y][x]);
+				fc::fc::colornames color;
+				if (animating)
+					color = getPieceColor(animating_board[y][x]);
+				else
+					color = getPieceColor(engine.board[y][x]);
 				setColor(color, color);
 
 				for(int sy = 0; sy < scale_y; ++sy) {
@@ -719,6 +811,9 @@ public:
 
 	void drawGhostPiece()
 	{
+		if (!draw_ghost)
+			return;
+
 		auto gp = engine.ghost_piece();
 		if (!gp)
 			return;
@@ -759,12 +854,87 @@ public:
 		}
 	}
 
-	void onTimer(fc::FTimerEvent*) override
+	void onTimer(fc::FTimerEvent *) override
+	{
+		if (animating)
+			onAnimationTimer(nullptr);
+		else
+			onEngineTimer(nullptr);
+	}
+
+	void onEngineTimer(fc::FTimerEvent*)
 	{
 		startx++; if (startx >= getWidth()) { startx = 0; ++starty; }
 		starty++; if (starty >= getHeight()) { starty = 0; startx = 0; }
 
-		engine.update();
+		doUpdate();
+
+		redraw();
+	}
+
+	void startAnimation()
+	{
+		std::size_t animation_ms = 1;
+
+		animating = true;
+		animating_start = std::chrono::high_resolution_clock::now();
+		animating_frame = 0;
+
+		delTimer(timer_id);
+		timer_id = addTimer(animation_ms);
+
+		for (int y = 0; y < cleared_lines.size(); ++y) {
+			for(int x = 0; x < engine.width; ++x) {
+				animating_board[cleared_lines[y]][x] = '9';
+			}
+		}
+	}
+
+	void onAnimationTimer(fc::FTimerEvent*)
+	{
+		std::size_t animation_time_ms = 250;
+
+		++animating_frame;
+
+		auto dur = std::chrono::high_resolution_clock::now() - animating_start;
+		auto dur_ms = std::chrono::duration_cast<std::chrono::milliseconds>(dur);
+		if ( dur_ms.count() > animation_time_ms ) {
+			animating = false;
+			delTimer(timer_id);
+			timer_id = addTimer(update_ms);
+			cleared_lines.clear();
+		}
+
+
+		// X X X X X X
+		//     ^ ^
+		//     l r
+		// X X X X X X X
+		//     l 0 r
+		bool iseven = engine.width % 2 == 0;
+
+		for (int i = 0; i < animating_board.size(); ++i) {
+			if (!iseven && animating_board[i][engine.width / 2] == '9')
+				animating_board[i][engine.width / 2] = '0';
+			else if (!iseven && animating_board[i][engine.width / 2] == '0')
+				animating_board[i][engine.width / 2] = '9';
+
+			for (int left = engine.width / 2 - 1,
+				     right = iseven ? engine.width / 2 : engine.width / 2 + 1;
+			     left >= 0 && right < engine.width;
+			     --left,++right)
+			{
+				if (animating_board[i][left] == '9')
+					animating_board[i][left] = '0';
+				else if (animating_board[i][left] == '0')
+					animating_board[i][left] = '9';
+
+				if (animating_board[i][right] == '9')
+					animating_board[i][right] = '0';
+				else if (animating_board[i][right] == '0')
+					animating_board[i][right] = '9';
+			}
+		}
 
 		redraw();
 	}
@@ -776,6 +946,28 @@ int main(int argc, char **argv)
 #if 1
 	fc::FApplication app{argc, argv};
 	TetrisWindow mainwindow{app};
+
+	mainwindow.engine.board = {
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 },
+		{ 's','s','s','s','s','s','s', 0,'s','s','s','s','s','s','s' },
+		{ 's','s','s','s','s','s','s', 0,'s','s','s','s','s','s','s' },
+		{ 's','s','s','s','s','s','s', 0,'s','s','s','s','s','s','s' },
+		{ 's','s','s','s','s','s','s', 0,'s','s','s','s','s','s','s' },
+	};
 
 	app.setMainWidget(&mainwindow);
 
